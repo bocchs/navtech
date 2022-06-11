@@ -38,7 +38,7 @@ Eigen::MatrixXd currOdom;
 int main(int argc, char *argv[]) 
 {
 	ros::init(argc, argv, "yetiOdom");
-	ros::NodeHandle nh;
+	ros::NodeHandle nh;	
 
     omp_set_num_threads(8);
 
@@ -50,8 +50,10 @@ int main(int argc, char *argv[])
 
     std::string seq_dir;
 	nh.param<std::string>("seq_dir", seq_dir, ""); // pose assignment every k frames 
-    std::string radardir = seq_dir + "sensor_data/radar/";
-    std::string datadir = radardir + "polar_oxford_form/";
+    //std::string radardir = seq_dir + "sensor_data/radar/";
+    std::string radardir = "/home/alex/data/radar/mulran/";
+    //std::string datadir = radardir + "polar_oxford_form/";
+    std::string datadir = seq_dir;
 
     // sensor params 
     int min_range = 58;                 // min range of radar points (bin)
@@ -248,7 +250,7 @@ int main(int argc, char *argv[])
 
         // pub
         nav_msgs::Odometry odom;
-        odom.header.frame_id = "/camera_init";
+        odom.header.frame_id = "camera_init";
         odom.child_frame_id = "/yeti_odom"; 
         // odom.header.stamp = ros::Time().fromSec( currOdomTimeSec );
         odom.header.stamp = currOdomROSTime;
@@ -270,7 +272,7 @@ int main(int argc, char *argv[])
         }
         sensor_msgs::PointCloud2 laserCloudLocalMsg;
         pcl::toROSMsg(*laserCloudLocal, laserCloudLocalMsg);
-        laserCloudLocalMsg.header.frame_id = "/camera_init";
+        laserCloudLocalMsg.header.frame_id = "camera_init";
         // laserCloudLocalMsg.header.stamp = ros::Time().fromSec (currOdomTimeSec );
         laserCloudLocalMsg.header.stamp = currOdomROSTime;
         pubLaserCloudLocal.publish(laserCloudLocalMsg);
@@ -289,7 +291,7 @@ int main(int argc, char *argv[])
         }
         sensor_msgs::PointCloud2 laserCloudGlobalMsg;
         pcl::toROSMsg(*laserCloudGlobal, laserCloudGlobalMsg);
-        laserCloudGlobalMsg.header.frame_id = "/camera_init";
+        laserCloudGlobalMsg.header.frame_id = "camera_init";
         // laserCloudGlobalMsg.header.stamp = ros::Time().fromSec (currOdomTimeSec );
         laserCloudGlobalMsg.header.stamp = currOdomROSTime;
         pubLaserCloudGlobal.publish(laserCloudGlobalMsg);
