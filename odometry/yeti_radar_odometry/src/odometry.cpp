@@ -19,7 +19,6 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/NavSatFix.h>
 #include <sensor_msgs/Image.h>
-#include <cv_bridge/cv_bridge.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <nav_msgs/Odometry.h>
@@ -127,13 +126,24 @@ int main(int argc, char *argv[])
         if( i % 100 == 0)
             std::cout << i << "/" << radar_files.size() << std::endl;
 
+	/*
+	  After first iteration: 
+	  desc1, targets1, kp1, etc. refer to previous radar image/timepoint 
+	  desc2, targets2, kp2, etc. will be populated in the current iteration with the current radar image/timepoint
+	  desc - descriptor for each keypoint ("keypoint" is equivalent to "target")
+	  cart_targets - keypoint coords in cartesian coords
+	  kp - keypoint coords in bev (bird's eye view) pixel coords
+	  img - cartesian radar image
+	*/
         if (i > 0) {
             t1 = t2; desc1 = desc2.clone(); cart_targets1 = cart_targets2;
             kp1 = kp2; img2.copyTo(img1);
         }
-	// load radar data into variables
+	// load radar polar image into fft_data
+	// fft_data: row x col = azimuth x range (contains power readings along each azimuth)
         load_radar(datadir + "/" + radar_files[i], times, azimuths, valid, fft_data, CIR204); // use CIR204 for MulRan dataset
 
+	// publish radar image
 	sensor_msgs::Image img;
 	img.header.stamp = ros::Time::now();
 	img.header.frame_id = "radar_img";
@@ -153,18 +163,25 @@ int main(int argc, char *argv[])
 	}
 	img.data = d;
 	image_pub.publish(img);
-		
+
+	// extract features (targets) from polar radar image (fft_data)
+	// "target" is equivalent to "keypoint"
         if (keypoint_extraction == 0)
             cen2018features(fft_data, zq, sigma_gauss, min_range, targets);
         if (keypoint_extraction == 1)
             cen2019features(fft_data, max_points, min_range, targets); // targets: 3xN
         if (keypoint_extraction == 0 || keypoint_extraction == 1) {
+	    // convert polar image (fft_data) into cartesian image (img2)
             radar_polar_to_cartesian(azimuths, fft_data, radar_resolution, cart_resolution, cart_pixel_width, interp, img2, CV_8UC1);  // NOLINT
+	    // convert target coords from polar (targets) to cartesian coords (cart_targets2)
             polar_to_cartesian_points(azimuths, times, targets, radar_resolution, cart_targets2, t2);
             cart_feature_cloud = cart_targets2;
+	    // bev: bird's eye view
+	    // convert target coords from cartesian (cart_targets2) to pixel coordinates (kp2) in bev image
             convert_to_bev(cart_targets2, cart_resolution, cart_pixel_width, patch_size, kp2, t2);
             // cen2019descriptors(azimuths, cv::Size(fft_data.cols, fft_data.rows), targets, cart_targets2,
                 // radar_resolution, 0.3456, 722, desc2);
+	    // compute descriptors (desc2) for each keypoint (kp2)
             detector->compute(img2, kp2, desc2);
         }
         if (keypoint_extraction == 2) {
@@ -192,6 +209,8 @@ int main(int argc, char *argv[])
         }
 
         // Convert the good key point matches to Eigen matrices
+	// p1 - arrray of cartesian coords for targets1 that have a match
+	// p2 - array of cartesian coords for targets2 that have a match
         Eigen::MatrixXd p1 = Eigen::MatrixXd::Zero(2, good_matches.size());
         Eigen::MatrixXd p2 = p1;
         std::vector<int64_t> t1prime = t1, t2prime = t2;
@@ -213,6 +232,7 @@ int main(int argc, char *argv[])
         int64 time2 = std::stoll(parts[0]);
         double delta_t = (time2 - time1) / 1000000.0;
 
+	// compute transform from img1 to img2 using matched keypoints and RANSAC
         // v1: Compute the transformation using RANSAC
         Ransac ransac(p2, p1, ransac_threshold, inlier_ratio, max_iterations);
         srand(i);
@@ -288,6 +308,7 @@ int main(int argc, char *argv[])
         odom.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(0.0, 0.0, currYaw);
         pubOdom.publish(odom); // last pose 
 
+	// fill local point cloud with keypoints in cartesian coords
         float contant_z_nonzero = 1.0; // for scan context (in this naive case, we can say we will use binary scan context).
         pcl::PointCloud<PointType>::Ptr laserCloudLocal(new pcl::PointCloud<PointType>());
         for (uint pt_idx = 0; pt_idx < cart_feature_cloud.cols(); ++pt_idx) {
@@ -305,6 +326,7 @@ int main(int argc, char *argv[])
         laserCloudLocalMsg.header.stamp = currOdomROSTime;
         pubLaserCloudLocal.publish(laserCloudLocalMsg);
 
+	// fill global point cloud by transforming cartesian keypoint coords into global cartesian coords
         pcl::PointCloud<PointType>::Ptr laserCloudGlobal(new pcl::PointCloud<PointType>());
         for (uint pt_idx = 0; pt_idx < cart_feature_cloud.cols(); ++pt_idx) {
             // cart_feature_cloud: 3xN (i.e., [x,y,z]' x N points)
