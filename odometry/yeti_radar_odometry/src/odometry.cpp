@@ -18,6 +18,8 @@
 #include <pcl/point_types.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/NavSatFix.h>
+#include <sensor_msgs/Image.h>
+#include <cv_bridge/cv_bridge.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <nav_msgs/Odometry.h>
@@ -32,27 +34,31 @@ typedef pcl::PointXYZI PointType;
 
 ros::Publisher pubOdom;
 ros::Publisher pubLaserCloudLocal, pubLaserCloudGlobal;
+ros::Publisher image_pub;
 Eigen::MatrixXd currOdom;
 
 // modified for MulRan dataset batch evaluation 
 int main(int argc, char *argv[]) 
 {
-	ros::init(argc, argv, "yetiOdom");
-	ros::NodeHandle nh;	
+    ros::init(argc, argv, "yetiOdom");
+    ros::NodeHandle nh;	
 
     omp_set_num_threads(8);
 
-	pubOdom = nh.advertise<nav_msgs::Odometry>("/yeti_odom", 100);
+    // publish messages of type "nav_msg::Odometry" on the topic "yeti_odom"
+    pubOdom = nh.advertise<nav_msgs::Odometry>("/yeti_odom", 100);
     currOdom = Eigen::MatrixXd::Identity(4, 4); // initial pose is I
 
-	pubLaserCloudLocal = nh.advertise<sensor_msgs::PointCloud2>("/yeti_cloud_local", 100);
-	pubLaserCloudGlobal = nh.advertise<sensor_msgs::PointCloud2>("/yeti_cloud_global", 100);
+    // publish messages of type "sensor_msgs::PointCloud2" on the topic "yeti_cloud_local"
+    pubLaserCloudLocal = nh.advertise<sensor_msgs::PointCloud2>("/yeti_cloud_local", 100);
+    pubLaserCloudGlobal = nh.advertise<sensor_msgs::PointCloud2>("/yeti_cloud_global", 100);
 
+    image_pub = nh.advertise<sensor_msgs::Image>("/yeti_img", 100);
+
+    // radar image paths
     std::string seq_dir;
 	nh.param<std::string>("seq_dir", seq_dir, ""); // pose assignment every k frames 
-    //std::string radardir = seq_dir + "sensor_data/radar/";
     std::string radardir = "/home/alex/data/radar/mulran/";
-    //std::string datadir = radardir + "polar_oxford_form/";
     std::string datadir = seq_dir;
 
     // sensor params 
@@ -115,6 +121,7 @@ int main(int argc, char *argv[])
     std::vector<bool> valid;
     cv::Mat fft_data;
 
+    // iterate over each radar frame/file
     for (uint i = 0; i < radar_files.size() - 1; ++i) 
     {
         if( i % 100 == 0)
@@ -124,8 +131,29 @@ int main(int argc, char *argv[])
             t1 = t2; desc1 = desc2.clone(); cart_targets1 = cart_targets2;
             kp1 = kp2; img2.copyTo(img1);
         }
+	// load radar data into variables
         load_radar(datadir + "/" + radar_files[i], times, azimuths, valid, fft_data, CIR204); // use CIR204 for MulRan dataset
 
+	sensor_msgs::Image img;
+	img.header.stamp = ros::Time::now();
+	img.header.frame_id = "radar_img";
+	img.encoding = "8UC1";
+	img.height = fft_data.size().height;
+	img.width = fft_data.size().width;
+	img.is_bigendian = 0;
+	img.step = img.width;
+	std::vector<uint8_t> d(img.height*img.width);
+	for (uint row = 0; row < img.height; ++row) {
+	    for (uint col = 0; col < img.width; ++col) {
+		int idx = img.width * row + col;
+		// fft_data is a float matrix (see load_radar() in radar_utils.cpp)
+		uint8_t val = (uint8_t) (fft_data.at<float>(row, col) * 255.0);
+		d[idx] = val;
+	    }
+	}
+	img.data = d;
+	image_pub.publish(img);
+		
         if (keypoint_extraction == 0)
             cen2018features(fft_data, zq, sigma_gauss, min_range, targets);
         if (keypoint_extraction == 1)
