@@ -46,6 +46,13 @@ int main(int argc, char *argv[])
 
     // publish messages of type "nav_msg::Odometry" on the topic "yeti_odom"
     pubOdom = nh.advertise<nav_msgs::Odometry>("/yeti_odom", 100);
+
+    /* 
+       Top left 3x3 block corresponds to orientation. Since data has z=0, this
+       block corresponds to the z rotation matrix.
+       Rightmost column is the x,y,z location.
+       Bottom row is just (0,0,0,1)
+    */
     currOdom = Eigen::MatrixXd::Identity(4, 4); // initial pose is I
 
     // publish messages of type "sensor_msgs::PointCloud2" on the topic "yeti_cloud_local"
@@ -283,6 +290,9 @@ int main(int argc, char *argv[])
         ofs << Tmd2(0, 3) << "," << Tmd2(1, 3) << "," << yaw3 << "\n";
 
         // curuent state
+	std::cout << currOdom << std::endl;
+	std::cout << "--------------" << std::endl;
+	//std::cout << Tmd << std::endl << std::endl;
         currOdom = currOdom * Tmd;
         Eigen::Matrix3d currOdomRot = currOdom.block(0,0,3,3);
         Eigen::Vector3d currOdomEuler = currOdomRot.eulerAngles(0,1,2);
@@ -306,7 +316,8 @@ int main(int argc, char *argv[])
         odom.pose.pose.position.y = currOdom(1, 3);
         odom.pose.pose.position.z = currOdom(2, 3);
         odom.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(0.0, 0.0, currYaw);
-        pubOdom.publish(odom); // last pose 
+        pubOdom.publish(odom); // last pose
+	
 
 	// fill local point cloud with keypoints in cartesian coords
         float contant_z_nonzero = 1.0; // for scan context (in this naive case, we can say we will use binary scan context).

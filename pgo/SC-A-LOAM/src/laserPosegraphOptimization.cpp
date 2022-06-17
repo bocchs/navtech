@@ -64,7 +64,7 @@ double movementAccumulation = 1000000.0; // large value means must add the first
 bool isNowKeyFrame = false; 
 
 std::queue<nav_msgs::Odometry::ConstPtr> odometryBuf;
-std::queue<sensor_msgs::PointCloud2ConstPtr> fullResBuf;
+std::queue<sensor_msgs::PointCloud2ConstPtr> fullResBuf; // local point cloud
 std::queue<sensor_msgs::NavSatFix::ConstPtr> gpsBuf;
 std::queue<std::pair<int, int> > scLoopICPBuf;
 
@@ -73,6 +73,7 @@ std::mutex mKF;
 
 double timeLaserOdometry = 0;
 
+// local point cloud
 pcl::PointCloud<PointType>::Ptr laserCloudFullRes(new pcl::PointCloud<PointType>());
 pcl::PointCloud<PointType>::Ptr laserCloudMapAfterPGO(new pcl::PointCloud<PointType>());
 
@@ -128,6 +129,7 @@ void laserOdometryHandler(const nav_msgs::Odometry::ConstPtr &_laserOdometry)
 	mBuf.unlock();
 } // laserOdometryHandler
 
+// receives yeti local point cloud
 void laserCloudFullResHandler(const sensor_msgs::PointCloud2ConstPtr &_laserCloudFullRes)
 {
 	mBuf.lock();
@@ -408,12 +410,12 @@ void process_pg()
 {
     while(1)
     {
-		while ( !odometryBuf.empty() && !fullResBuf.empty() )
+        while ( !odometryBuf.empty() && !fullResBuf.empty() )
         {
-            //
-            // pop and check keyframe is or not  
-            // 
-			mBuf.lock();       
+            // pop and check keyframe is or not
+	    // Pop odometry entries until the first (oldest) entry occured after
+            // the first (oldest) point cloud entry (w.r.t. time)
+	    mBuf.lock();
             while (!odometryBuf.empty() && odometryBuf.front()->header.stamp.toSec() < fullResBuf.front()->header.stamp.toSec())
                 odometryBuf.pop();
             if (odometryBuf.empty())
@@ -422,10 +424,14 @@ void process_pg()
                 break;
             }
 
+	    // At this point, odometryBuf.front() has the first odom entry that
+	    // happened after the current oldest point cloud entry (fullResBuf.front())
+
             // Time equal check
             timeLaserOdometry = odometryBuf.front()->header.stamp.toSec();
             // TODO
 
+	    // thisKeyFrame has current local point cloud, remove from buffer
             laserCloudFullRes->clear();
             pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
             pcl::fromROSMsg(*fullResBuf.front(), *thisKeyFrame);
@@ -455,9 +461,11 @@ void process_pg()
             // 
             odom_pose_prev = odom_pose_curr;
             odom_pose_curr = pose_curr;
+	    // get change in Euclidean distance between previous and curr position
             double delta_translation = transDiff(odom_pose_prev, odom_pose_curr);
             movementAccumulation += delta_translation;
 
+	    // make this a keyframe if far enough from previous keyframe
             if( movementAccumulation > keyframeMeterGap ) {
                 isNowKeyFrame = true;
                 movementAccumulation = 0.0; // reset 
@@ -478,10 +486,12 @@ void process_pg()
             //
             // Save data and Add consecutive node 
             //
+	    // downsample keyframe point cloud
             pcl::PointCloud<PointType>::Ptr thisKeyFrameDS(new pcl::PointCloud<PointType>());
             downSizeFilterScancontext.setInputCloud(thisKeyFrame);
             downSizeFilterScancontext.filter(*thisKeyFrameDS);
 
+	    // append keyframe point clouds, pose, timestamp to vectors
             mKF.lock(); 
             keyframeLaserClouds.push_back(thisKeyFrameDS);
             keyframePoses.push_back(pose_curr);
@@ -494,6 +504,15 @@ void process_pg()
             mKF.unlock(); 
 
             if( ! gtSAMgraphMade /* prior node */) {
+		/*
+		  https://gtsam.org/tutorials/intro.html#magicparlabel-65377
+		  Initialize gtSAM graph, add first node (pose at origin)
+		  Graph composed of factors and variables
+		  Factors are functions that encode probabilities between variables
+		  Variables are poses (position and attitude)
+		  Want to maximize likelihood to estimate the poses (variables) in the graph
+		  Node corresponds to keyframe corresponds to a pose
+		*/
                 const int init_node_idx = 0; 
                 gtsam::Pose3 poseOrigin = Pose6DtoGTSAMPose3(keyframePoses.at(init_node_idx));
                 // auto poseOrigin = gtsam::Pose3(gtsam::Rot3::RzRyRx(0.0, 0.0, 0.0), gtsam::Point3(0.0, 0.0, 0.0));
@@ -518,6 +537,8 @@ void process_pg()
 
                 mtxPosegraph.lock();
                 {
+		    // add factor to gtSAM graph using prev and curr pose
+		    
                     // odom factor
                     gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, poseFrom.between(poseTo), odomNoise));
 
@@ -531,7 +552,7 @@ void process_pg()
                         cout << "GPS factor added at node " << curr_node_idx << endl;
                     }
                     initialEstimate.insert(curr_node_idx, poseTo);                
-                    runISAM2opt();
+                    runISAM2opt(); // update poses to maximize likelihood
                 }
                 mtxPosegraph.unlock();
 
@@ -690,9 +711,22 @@ int main(int argc, char **argv)
     float map_vis_size = 0.2;
     downSizeFilterMapPGO.setLeafSize(map_vis_size, map_vis_size, map_vis_size);
 
-	ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
-	ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
-	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
+    /*
+      Subcribed to "/velodyne_cloud...local", but this is remapped to 
+      "/yeti_cloud_local" in sc_pgo.launch file. Therefore actually subscribed 
+      to "/yeti_cloud_local" for receiving local point clouds.
+      Calls laserCloudFullResHandler() when a message is received.
+    */
+    ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
+
+    /*
+      Subcribed to "/aft_mapped_to_init", but this is remapped to 
+      "/yeti_odom" in sc_pgo.launch file. Therefore actually subscribed to 
+      "/yeti_odom" for receiving pose values.
+      Calls laserOdometryHandler() when a message is received.
+    */
+    ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
+    ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
 
 	pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
 	pubOdomRepubVerifier = nh.advertise<nav_msgs::Odometry>("/repub_odom", 100);
@@ -703,7 +737,8 @@ int main(int argc, char **argv)
 	pubLoopSubmapLocal = nh.advertise<sensor_msgs::PointCloud2>("/loop_submap_local", 100);
 
 	std::thread posegraph_slam {process_pg}; // pose graph construction
-	std::thread lc_detection {process_lcd}; // loop closure detection 
+	std::thread lc_detection {process_lcd}; // loop closure detection
+	// icp - iterative closest point: rotate/translate point cloud to match reference point cloud as closely as possible
 	std::thread icp_calculation {process_icp}; // loop constraint calculation via icp 
 	std::thread viz_map {process_viz_map}; // visualization - map (low frequency because it is heavy)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
